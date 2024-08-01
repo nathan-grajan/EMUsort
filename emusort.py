@@ -539,6 +539,8 @@ def extract_sorting_result(sorting, ii):
     if final_filename[-1] == ",":
         final_filename = final_filename[:-1]
 
+    final_filename = final_filename + "_KS4"
+
     # rename the folder to preserve the latest sorting results in the sorted_group#_worker# folder
     shutil.move(these_configs[ii]["Data"]["sorted_folder"], final_filename)
     # add entry to the config file for the final folder
@@ -651,7 +653,7 @@ if __name__ == "__main__":
     assert (
         full_config["KS"]["do_correction"] == False
     ), "do_correction must be False for EMUsort"
-    assert full_config["KS"]["do_CAR"] == False, "do_CAR must be False for EMUsort"
+    # assert full_config["KS"]["do_CAR"] == False, "do_CAR must be False for EMUsort"
 
     # EMG Preprocessing and Spike Sorting
     if args.sort:
