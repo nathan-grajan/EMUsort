@@ -40,7 +40,7 @@ def create_config(
 
     This function ensures that both `repo_folder` and `session_folder` are Path objects.
     It then copies the "config_template_emu.yaml" or "config_template_ks4.yaml" file from the `repo_folder` to the `session_folder`
-    and renames it to "emu_config.yaml".
+    and renames it to "emu_config.yaml" or "ks4_config.yaml".
 
     Parameters:
     - repo_folder: Union[Path, str] - The path to the repository folder containing the configuration template.
@@ -60,7 +60,7 @@ def create_config(
 
     shutil.copyfile(
         repo_folder / "configs" / f"config_template_{sort_type_str}.yaml",
-        session_folder / "emu_config.yaml",
+        session_folder / f"{sort_type_str}_config.yaml",
     )
 
 
@@ -630,13 +630,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Generate, reset, or load config file
-    config_file_path = Path(args.folder).joinpath("emu_config.yaml")
+    config_file_path = Path(args.folder).joinpath("ks4_config.yaml")
     # if the config doesn't exist or user wants to reset, load the config template
     if not config_file_path.exists() or args.reset_config or args.reset_config_ks4:
         print(f"Generating config file from default template: \n{config_file_path}\n")
-        create_config(
-            Path(__file__).parent, Path(args.folder), ks4=args.reset_config_ks4
-        )
+        create_config(Path(__file__).parent, Path(args.folder), ks4=True)
 
     # open text editor to validate or edit the configuration file if desired
     if args.config:

@@ -36,10 +36,10 @@ Sorting:
             - [2, 1]
         spkTh: # Th_single_ch
             - [6]
-            - [3]
             - [4.5]
             - [7.5]
             - [9]
+            - [10.5]
 # Group-specific parameters
 # channel groups are sorted separately, rows of each parameter define settings for each group
 Group:
@@ -55,8 +55,9 @@ KS:
     remove_chan_delays: false # this setting is added to KS4 for EMUsort
     batch_size: 60000
     nblocks: 0
-    Th_universal: 9
-    Th_learned: 8
+    Th_universal:
+    Th_learned:
+    Th_single_ch:
     do_CAR: true
     invert_sign: false
     nt: 61
@@ -75,7 +76,6 @@ KS:
     templates_from_data: true
     n_templates: 6
     n_pcs: 6
-    Th_single_ch: 6
     acg_threshold: 0.2
     ccg_threshold: 0.25
     cluster_downsampling: 20
