@@ -17,8 +17,7 @@ from copy import deepcopy
 # from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import Pool
 from pathlib import Path
-from pdb import set_trace
-from typing import List, Union
+from typing import Union
 
 import numpy as np
 import spikeinterface as si
@@ -612,11 +611,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Reset the configuration file to the default EMUsort template",
     )
-    parser.add_argument(  # ability to reset the config file for KS4 default settings
-        "--reset-config-ks4",
-        action="store_true",
-        help="Reset the configuration file to the default Kilosort4 template",
-    )
     parser.add_argument(
         "-s", "--sort", action="store_true", help="Perform spike sorting"
     )
@@ -632,7 +626,7 @@ if __name__ == "__main__":
     # Generate, reset, or load config file
     config_file_path = Path(args.folder).joinpath("ks4_config.yaml")
     # if the config doesn't exist or user wants to reset, load the config template
-    if not config_file_path.exists() or args.reset_config or args.reset_config_ks4:
+    if not config_file_path.exists() or args.reset_config:
         print(f"Generating config file from default template: \n{config_file_path}\n")
         create_config(Path(__file__).parent, Path(args.folder), ks4=True)
 
