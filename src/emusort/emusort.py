@@ -20,6 +20,7 @@ from typing import Union
 
 import numpy as np
 import spikeinterface as si
+import spikeinterface.full as siFull
 import spikeinterface.extractors as se
 import spikeinterface.preprocessing as spre
 import spikeinterface.sorters as ss
@@ -42,7 +43,7 @@ from torch.cuda import is_available
 
 
 def create_config(
-    repo_folder: Union[Path, str], session_folder: Union[Path, str], ks4: bool = False
+    repo_folder: Union[Path, str], session_folder: Union[Path, str], ks4: bool = True
 ):
     """
     Copies a configuration template file from the repository folder to the session folder.
@@ -74,22 +75,22 @@ def create_config(
 
 
 def create_probe(recording_obj):
-    num_emg_chans = len(recording_obj.get_channel_ids())
-    positions = np.zeros((num_emg_chans, 2))
-    for i in range(num_emg_chans):
-        x = 0
-        y = i
-        positions[i] = x, y
-    positions[:, 1] *= -2
+    # num_emg_chans = len(recording_obj.get_channel_ids())
+    # positions = np.zeros((num_emg_chans, 2))
+    # for i in range(num_emg_chans):
+    #     x = 0
+    #     y = i
+    #     positions[i] = x, y
+    # positions[:, 1] *= -2
 
-    probe = Probe(ndim=2, si_units="um")
-    probe.set_contacts(positions=positions, shapes="square", shape_params={"width": 1})
-    probe.device_channel_indices = np.arange(num_emg_chans)
+    # probe = Probe(ndim=2, si_units="um")
+    # probe.set_contacts(positions=positions, shapes="square", shape_params={"width": 1})
+    # probe.device_channel_indices = np.arange(num_emg_chans)
 
-    print(
-        f"Probe created: {probe}, with {num_emg_chans} channels at positions: \n {positions}"
-    )
-    return probe
+    # print(
+    #     f"Probe created: {probe}, with {num_emg_chans} channels at positions: \n {positions}"
+    # )
+    return recording_obj.get_probe() # neuropixels 
 
 
 def strfdelta(tdelta: datetime, fmt: str) -> str:
@@ -275,7 +276,9 @@ def load_ephys_data(
                 )
             )
         loaded_recording = si.append_recordings(loaded_recording_list)
-
+    elif dataset_type == "sglx":
+        loaded_recording = siFull.read_spikeglx(session_folder, stream_name = 'imec0.ap', load_sync_channel=False)
+        # TODO: Add concatenation feature for multiple recordings. only works for one rn 
     return loaded_recording
 
 
@@ -856,7 +859,7 @@ def main():
 
     # Generate, reset, or load config file
     config_file_path = (
-        Path(args.folder).expanduser().resolve().joinpath("emu_config.yaml")
+        Path(args.folder).expanduser().resolve().joinpath("ks4_config.yaml")
     )
     # if the config doesn't exist or user wants to reset, load the config template
     if not config_file_path.exists() or args.reset_config or args.ks4_reset_config:
@@ -888,11 +891,11 @@ def main():
         chunk_duration=full_config["SI"]["chunk_duration"],
     )
 
-    # below are checks of the configuration file to avoid downstream errors
-    assert full_config["KS"]["nblocks"] == False, "nblocks must be False for EMUsort"
-    assert (
-        full_config["KS"]["do_correction"] == False
-    ), "do_correction must be False for EMUsort"
+    # # below are checks of the configuration file to avoid downstream errors
+    # assert full_config["KS"]["nblocks"] == False, "nblocks must be False for EMUsort"
+    # assert (
+    #     full_config["KS"]["do_correction"] == False
+    # ), "do_correction must be False for EMUsort"
     # assert full_config["KS"]["do_CAR"] == False, "do_CAR must be False for EMUsort"
 
     # EMG Preprocessing and Spike Sorting
@@ -900,6 +903,7 @@ def main():
 
         # load data from the session folder
         recording = load_ephys_data(full_config)
+        print("Finished loading")
         # Setting GPU ordering for parallel jobs to match nvidia-smi and nvitop
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         # ensure that the output folder is set to the session folder if not specified
