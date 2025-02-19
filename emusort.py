@@ -8,38 +8,49 @@ if sys.version_info < (3, 5):
 from datetime import datetime
 
 start_time = datetime.now()  # include imports in time cost
+
 import argparse
+import asyncio
 import os
 import shutil
 import subprocess
 from copy import deepcopy
-
-# from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import Pool
 from pathlib import Path
 from typing import Union
 
 import numpy as np
 import spikeinterface as si
+import spikeinterface.full as siFull
 import spikeinterface.extractors as se
 import spikeinterface.preprocessing as spre
 import spikeinterface.sorters as ss
-from probeinterface import Probe  # , get_probe
+from probeinterface import Probe
 from ruamel.yaml import YAML
 from sklearn.model_selection import ParameterGrid
 from spikeinterface.exporters import export_to_phy
+from spikeinterface.postprocessing import compute_spike_amplitudes
+from spikeinterface.qualitymetrics.misc_metrics import (
+    compute_amplitude_cutoffs,
+    compute_firing_ranges,
+    compute_firing_rates,
+    compute_num_spikes,
+    compute_presence_ratios,
+    compute_refrac_period_violations,
+    compute_sd_ratio,
+    compute_snrs,
+)
 from torch.cuda import is_available
 
 
 def create_config(
-    repo_folder: Union[Path, str], session_folder: Union[Path, str], ks4: bool = False
+    repo_folder: Union[Path, str], session_folder: Union[Path, str], ks4: bool = True
 ):
     """
     Copies a configuration template file from the repository folder to the session folder.
 
     This function ensures that both `repo_folder` and `session_folder` are Path objects.
     It then copies the "config_template_emu.yaml" or "config_template_ks4.yaml" file from the `repo_folder` to the `session_folder`
-    and renames it to "emu_config.yaml" or "ks4_config.yaml".
+    and renames it to "emu_config.yaml".
 
     Parameters:
     - repo_folder: Union[Path, str] - The path to the repository folder containing the configuration template.
@@ -64,22 +75,22 @@ def create_config(
 
 
 def create_probe(recording_obj):
-    num_emg_chans = len(recording_obj.get_channel_ids())
-    positions = np.zeros((num_emg_chans, 2))
-    for i in range(num_emg_chans):
-        x = 0
-        y = i
-        positions[i] = x, y
-    positions[:, 1] *= -2
+    # num_emg_chans = len(recording_obj.get_channel_ids())
+    # positions = np.zeros((num_emg_chans, 2))
+    # for i in range(num_emg_chans):
+    #     x = 0
+    #     y = i
+    #     positions[i] = x, y
+    # positions[:, 1] *= -2
 
-    probe = Probe(ndim=2, si_units="um")
-    probe.set_contacts(positions=positions, shapes="square", shape_params={"width": 1})
-    probe.device_channel_indices = np.arange(num_emg_chans)
+    # probe = Probe(ndim=2, si_units="um")
+    # probe.set_contacts(positions=positions, shapes="square", shape_params={"width": 1})
+    # probe.device_channel_indices = np.arange(num_emg_chans)
 
-    print(
-        f"Probe created: {probe}, with {num_emg_chans} channels at positions: \n {positions}"
-    )
-    return probe
+    # print(
+    #     f"Probe created: {probe}, with {num_emg_chans} channels at positions: \n {positions}"
+    # )
+    return recording_obj.get_probe() # neuropixels 
 
 
 def strfdelta(tdelta: datetime, fmt: str) -> str:
@@ -106,6 +117,7 @@ def strfdelta(tdelta: datetime, fmt: str) -> str:
 def dump_yaml(dump_path: Path, this_config: dict):
     # convert Path objects to strings before saving
     this_config = path_to_str_recursive(this_config)
+    yaml = YAML()
     with open(dump_path, "w") as f:
         yaml.dump(this_config, f)
 
@@ -142,6 +154,17 @@ def path_to_str_recursive(data):
         return data
 
 
+def movetree(src, dest):
+    for item in src.iterdir():
+        dest_item = dest / item.name
+        if dest_item.exists():
+            if dest_item.is_file():
+                dest_item.unlink()
+            elif dest_item.is_dir():
+                shutil.rmtree(dest_item)
+        shutil.move(str(item), str(dest))
+
+
 def load_ephys_data(
     config: dict,
 ) -> si.ChannelSliceRecording:
@@ -159,7 +182,41 @@ def load_ephys_data(
     dataset_type = config["Data"]["dataset_type"]
     if dataset_type == "openephys":
         # If loading Open Ephys data
-        loaded_recording = se.read_openephys(session_folder)
+        loaded_recording = se.read_openephys(
+            session_folder,
+            stream_id=str(config["Data"]["openephys_stream_id"]),
+            block_index=config["Data"]["openephys_experiment_id"],
+        )
+
+    # blackrock dataset
+    elif dataset_type == "blackrock":
+
+        print("Running Blackrock Read Code...")
+
+        # debug = sorted(Path(session_folder).iterdir())
+
+        # Get list of Blackrock .nsX files
+        nsx_files = [
+            nsx_file
+            for nsx_file in sorted(Path(session_folder).iterdir())
+            if nsx_file.suffix.lower()
+            in [".ns1", ".ns2", ".ns3", ".ns4", ".ns5", ".ns6"]
+        ]
+
+        print("Found nsx files:", nsx_files)
+
+        if config["Data"]["emg_recordings"][0] == "all":
+            chosen_nsx_files = nsx_files
+        else:
+            chosen_nsx_files = [nsx_files[i] for i in config["Data"]["emg_recordings"]]
+
+        # Load Blackrock data
+        loaded_recording_list = []
+        for nsx_file in chosen_nsx_files:
+            loaded_recording_list.append(se.read_blackrock(str(nsx_file)))
+
+        loaded_recording = si.append_recordings(loaded_recording_list)
+
     elif dataset_type == "intan":
         # get list of intan recordings
         rhd_and_rhs_files = [
@@ -192,7 +249,7 @@ def load_ephys_data(
         # If loading NWB data
         loaded_recording_list = []
         for iRec in chosen_nwb_files:
-            loaded_recording_list.append(se.NwbRecordingExtractor(str(iRec)))
+            loaded_recording_list.append(se.read_nwb(str(iRec)))
         loaded_recording = si.append_recordings(loaded_recording_list)
     elif dataset_type == "binary":
         # get list of binary recordings
@@ -213,13 +270,15 @@ def load_ephys_data(
             loaded_recording_list.append(
                 se.read_binary(
                     str(iRec),
-                    sampling_frequency=config["Data"]["emg_sampling_rate"],
-                    num_channels=config["Data"]["emg_num_channels"],
-                    dtype=config["Data"]["emg_dtype"],
+                    sampling_frequency=config["Data"]["binary_sampling_rate"],
+                    num_channels=config["Data"]["binary_num_channels"],
+                    dtype=config["Data"]["binary_dtype"],
                 )
             )
         loaded_recording = si.append_recordings(loaded_recording_list)
-
+    elif dataset_type == "sglx":
+        loaded_recording = siFull.read_spikeglx(session_folder, stream_name = 'imec0.ap', load_sync_channel=False)
+        # TODO: Add concatenation feature for multiple recordings. only works for one rn 
     return loaded_recording
 
 
@@ -250,7 +309,7 @@ def preprocess_ephys_data(
     else:
         emg_recordings_to_use = np.array(this_config["Data"]["emg_recordings"])
 
-    if len(emg_recordings_to_use) > 1 and time_range_is_disabled:
+    if len(emg_recordings_to_use) > 1 and not time_range_is_disabled:
         raise ValueError(
             "Time range must be disabled if concatenating recordings (i.e., time_range: [0, 0])."
         )
@@ -268,6 +327,18 @@ def preprocess_ephys_data(
     else:
         loaded_recording = recording_obj.select_segments(emg_recordings_to_use)
 
+    # check for [all] in emg_chan_list
+    if this_config["Group"]["emg_chan_list"][iGroup][0] == "all":
+        this_config["Group"]["emg_chan_list"][iGroup] = np.arange(
+            loaded_recording.get_num_channels()
+        ).tolist()
+        # remove any ADC channels from the list for OpenEphys recordings
+        if this_config["Data"]["dataset_type"] == "openephys":
+            this_config["Group"]["emg_chan_list"][iGroup] = [
+                int(chan_idx)
+                for chan_idx in this_config["Group"]["emg_chan_list"][iGroup]
+                if "ADC" not in str(loaded_recording.get_channel_ids()[chan_idx])
+            ]
     # slice channels for this group
     selected_channel_ids = loaded_recording.get_channel_ids()[
         this_config["Group"]["emg_chan_list"][iGroup]
@@ -306,18 +377,24 @@ def preprocess_ephys_data(
         recording_filtered = recording_filtered.set_probe(probe)
         # input can be either "mad" or "coherence+psd", but users may input mad# where # is a number
         # setting the threshold
-        numeric_idxs = np.nonzero([i.isdigit() for i in remove_bad_emg_chans])[0]
+        numeric_idxs = np.nonzero(
+            [(i.isdigit() or i == ".") for i in remove_bad_emg_chans]
+        )[0]
         num_digits = len(numeric_idxs)
         if num_digits > 0:
-            if num_digits > 1:
-                assert (
-                    np.diff(numeric_idxs).all() == 1
-                ), f"Invalid input for remove_bad_emg_chans: {remove_bad_emg_chans}. If using a threshold, it must be a number after the method string."
+            assert float(remove_bad_emg_chans[numeric_idxs[0] :]) > 0, (
+                f"Invalid input for remove_bad_emg_chans: {remove_bad_emg_chans}. "
+                "If using a threshold, it must be a positive float after the method string."
+            )
+            # if num_digits > 1:
+            #     assert (
+            #         np.diff(numeric_idxs).all() == 1
+            #     ), f"Invalid input for remove_bad_emg_chans: {remove_bad_emg_chans}. If using a threshold, it must be a number after the method string."
             method_str = remove_bad_emg_chans[: numeric_idxs[0]]
             assert (
                 method_str != "coherence+psd"
             ), f'Invalid input for remove_bad_emg_chans: {remove_bad_emg_chans}. "coherence+psd" method does not take a threshold value.'
-            threshold = int(remove_bad_emg_chans[numeric_idxs[0] :])
+            threshold = float(remove_bad_emg_chans[numeric_idxs[0] :])
         else:
             method_str = remove_bad_emg_chans
             threshold = 5
@@ -441,49 +518,181 @@ def concatenate_emg_data(
                         "Failed to load previously concatenated data, re-running concatenation..."
                     )
                     recording_concatenated = concat_and_save(concat_data_path)
+                    dump_yaml(
+                        concat_data_path.joinpath("last_config.yaml"), this_config
+                    )
         else:
+            print(
+                "No previous configuration file 'last_config.yaml' found, re-running concatenation..."
+            )
+            recording_concatenated = concat_and_save(concat_data_path)
             dump_yaml(concat_data_path.joinpath("last_config.yaml"), this_config)
     else:
         concat_data_path.mkdir(parents=True, exist_ok=True)
         print("Concatenated data folder created.")
-        dump_yaml(concat_data_path.joinpath("last_config.yaml"), this_config)
         recording_concatenated = concat_and_save(concat_data_path)
+        dump_yaml(concat_data_path.joinpath("last_config.yaml"), this_config)
 
     return recording_concatenated
 
 
-def extract_sorting_result(sorting, ii):
+def get_emusort_scores(we, ii):
+    ### Compute sorting quality metrics, Overall EMUsort score
+
+    ## Check Type I errors (false positives)
+    rp_contamination, rp_violations = compute_refrac_period_violations(
+        we,
+        refractory_period_ms=2.0,
+        censored_period_ms=0.0,
+    )
+    rp_contamination_scores = 1 - np.fromiter(rp_contamination.values(), float)
+
+    _ = compute_spike_amplitudes(we, peak_sign="both")
+    num_spikes = compute_num_spikes(
+        we,
+    )
+    rp_violation_fraction_scores = 1 - np.fromiter(rp_violations.values(), int) / (
+        1 + np.fromiter(num_spikes.values(), int)
+    )
+    type_I_scores = rp_violation_fraction_scores * rp_contamination_scores
+
+    ## Check Type II errors (false negatives)
+    presence_ratios = compute_presence_ratios(
+        we, bin_duration_s=20.0, mean_fr_ratio_thresh=0.5
+    )
+    presence_ratio_scores = np.fromiter(presence_ratios.values(), float)
+
+    amplitude_cutoffs = compute_amplitude_cutoffs(
+        we,
+        peak_sign="both",
+        num_histogram_bins=32,
+    )
+    amplitude_Gaussianity_scores = 1 - np.fromiter(amplitude_cutoffs.values(), float)
+
+    type_II_scores = amplitude_Gaussianity_scores * presence_ratio_scores
+
+    ## Check Firing Rates Validity Against Known MU properties (200Hz sigmoid dropoff)
+    firing_rates = compute_firing_rates(
+        we,
+    )
+    firing_rate_viol_scores = 1 / (
+        1 + np.exp((np.fromiter(firing_rates.values(), float) + 1e-8) - 200)
+    )
+    firing_ranges = compute_firing_ranges(we, bin_size_s=0.5)
+    firing_range_viol_scores = 1 / (
+        1 + np.exp((np.fromiter(firing_ranges.values(), float) + 1e-8) - 200)
+    )
+    firing_rate_validity_scores = firing_rate_viol_scores * firing_range_viol_scores
+    # gets ratio of largest peak to snippet standard deviation
+    snrs = compute_snrs(
+        we,
+        peak_sign="both",
+    )
+    # gets ratio of largest peak to snippet standard deviation
+    sd_ratios = compute_sd_ratio(
+        we,
+        correct_for_drift=False,
+    )
+    norm_snr_scores = 1 - np.fromiter(sd_ratios.values(), float) / np.fromiter(
+        snrs.values(), float
+    )
+
+    # produce overall score, accounting for all quality metrics
+    emusort_scores = (
+        norm_snr_scores * firing_rate_validity_scores * type_I_scores * type_II_scores
+    )
+    emusort_score = np.nanmean(emusort_scores)
+
+    # get quality metric report string for this worker
+    report = (
+        "------------------------------------------------------------\n"
+        f" Worker {ii} Quality Scores Report:\n"
+        f" Norm SNR scores:\n{norm_snr_scores}\n"
+        f" Type I error scores:\n{type_I_scores}\n"
+        f" Type II error scores:\n{type_II_scores}\n"
+        f" Firing rate validity:\n{firing_rate_validity_scores}\n"
+        f" EMUsort scores:\n{emusort_scores}\n"
+        "------------------------------------------------------------\n"
+        f" Worker {ii} Overall EMUsort score: {emusort_score:.3f}\n"
+        "------------------------------------------------------------\n"
+    )
+    return emusort_scores, emusort_score, report
+
+
+async def extract_sorting_result(this_sorting, this_config, this_job, ii):
     """
-    Parallel-friendly function to extract and save the sorting results to the specified folder.
-
-    Parameters:
-    - sorting: KiloSortSortingExtractor - The sorting extractor object containing the spike sorting results.
-    - ii: int - The index of the sorting job in the job list.
-
-    Returns:
-    - None
+    Asynchronous version of extract_sorting_result, offloading blocking I/O tasks to background threads.
     """
     # Save sorting results by exporting to Phy format
-    waveforms_folder = Path(these_configs[ii]["Data"]["sorted_folder"]) / "waveforms"
-    phy_folder = Path(these_configs[ii]["Data"]["sorted_folder"]) / "phy"
+    sorted_folder = Path(this_config["Sorting"]["sorted_folder"])
+    waveforms_folder = sorted_folder / "waveforms"
+    phy_folder = sorted_folder / "phy"
+
+    # If these folders already exist, delete the contents
+    # if waveforms_folder.exists():
+    #     await asyncio.to_thread(shutil.rmtree, waveforms_folder)
+    # if phy_folder.exists():
+    #     await asyncio.to_thread(shutil.rmtree, phy_folder)
+    if waveforms_folder.exists():
+        shutil.rmtree(waveforms_folder)
+    if phy_folder.exists():
+        shutil.rmtree(phy_folder)
+
+    # get nt size from the sorting object, which is the width of the waveforms
+    sampling_frequency = this_sorting.get_sampling_frequency()
+    nt = this_config["KS"]["nt"]
+    ms_buffer = nt / sampling_frequency * 1000 / 2
+    print(
+        f"Worker {ii} extracting waveforms with nt={nt} at fs={sampling_frequency} Hz (ms_before=ms_after={np.round(ms_buffer, 3)} ms)."
+    )
+
     try:
-        we = si.extract_waveforms(
-            job_list[ii]["recording"], sorting, waveforms_folder, overwrite=True
+        # Extract waveforms
+        we = await asyncio.to_thread(
+            si.extract_waveforms,
+            this_job["recording"],
+            this_sorting,
+            # waveforms_folder,
+            mode="memory",
+            ms_before=ms_buffer,
+            ms_after=ms_buffer,
+            # overwrite=True,
+            sparse=False,
         )
     except ValueError as e:
-        print("Error extracting waveforms:", e)
         import spikeinterface.curation as scur
 
+        print("Error extracting waveforms:", e)
+
         remove_excess_spikes_recording = scur.remove_excess_spikes(
-            sorting, job_list[ii]["recording"]
+            this_sorting, this_job["recording"]
         )
 
-        # loaded_recording.set_probe(probe)
-        we = si.extract_waveforms(
-            remove_excess_spikes_recording, sorting, waveforms_folder, overwrite=True
+        we = await asyncio.to_thread(
+            si.extract_waveforms,
+            remove_excess_spikes_recording,
+            this_sorting,
+            # waveforms_folder,
+            mode="memory",
+            ms_before=ms_buffer,
+            ms_after=ms_buffer,
+            # overwrite=True,
+            sparse=False,
         )
+    print(f"Worker {ii} finished extracting waveforms, computing quality metrics...")
 
-    export_to_phy(
+    # Compute quality metrics asynchronously
+    _, emusort_score, report = await asyncio.to_thread(
+        get_emusort_scores,
+        we,
+        ii,
+    )
+
+    print(f"Worker {ii} exporting to Phy format...")
+
+    # Export to Phy format asynchronously
+    await asyncio.to_thread(
+        export_to_phy,
         we,
         output_folder=phy_folder,
         compute_pc_features=False,
@@ -492,66 +701,68 @@ def extract_sorting_result(sorting, ii):
         verbose=False,
     )
 
-    # move all sorter_output files into sorted_folder, then delete it
-    shutil.copytree(
-        Path(these_configs[ii]["Data"]["sorted_folder"]) / "sorter_output",
-        Path(these_configs[ii]["Data"]["sorted_folder"]),
-        dirs_exist_ok=True,
-    )
-    shutil.rmtree(
-        Path(these_configs[ii]["Data"]["sorted_folder"]) / "sorter_output",
-        ignore_errors=True,
+    print(
+        f"Worker {ii} finished exporting to Phy format, consolidating files into final folder..."
     )
 
-    # move all phy files into sorted_folder, overwriting any existing duplicate files, then delete it
-    shutil.copytree(
-        phy_folder,
-        Path(these_configs[ii]["Data"]["sorted_folder"]),
-        dirs_exist_ok=True,
-    )
+    # Move all files and subdirectories from sorter_output and phy_folder into sorted_folder
+    sorter_output = sorted_folder / "sorter_output"
+    # await asyncio.to_thread(movetree, sorter_output, sorted_folder)
+    # await asyncio.to_thread(movetree, phy_folder, sorted_folder)
+    # await asyncio.to_thread(shutil.rmtree, sorter_output, ignore_errors=True)
+    # await asyncio.to_thread(shutil.rmtree, phy_folder, ignore_errors=True)
+    movetree(sorter_output, sorted_folder)
+    movetree(phy_folder, sorted_folder)
+    shutil.rmtree(sorter_output, ignore_errors=True)
     shutil.rmtree(phy_folder, ignore_errors=True)
 
-    # move results into file folder for storage
+    # Move results into file folder for storage
     time_stamp_us = datetime.now().strftime("%Y%m%d_%H%M%S%f")
     Th_this_config = (
-        these_configs[ii]["KS"]["Th_learned"],
-        these_configs[ii]["KS"]["Th_universal"],
-        tuple(these_configs[ii]["KS"]["Th_single_ch"]),
+        this_config["KS"]["Th_learned"],
+        this_config["KS"]["Th_universal"],
+        tuple(this_config["KS"]["Th_single_ch"]),
     )
-    params_suffix = (
-        f"Th_{Th_this_config[0]},{Th_this_config[1]}_spkTh_{Th_this_config[2]})"
-    )
-    # export the KS parameter keys that were gridsearched to the filename as Param1-Vals1_Param2-Vals2
-    # params_suffix = "_".join(
-    #     [
-    #         f"{key}-{val}"
-    #         for key, val in iParams[ii].items()
-    #         if key in these_configs[ii]["Sorting"]["gridsearch_KS_params"]
-    #     ]
-    # )
-    final_filename = f'{str(Path(these_configs[ii]["Data"]["sorted_folder"])).split("_worker")[0]}_{time_stamp_us}_{params_suffix}'
-    # remove whitespace and parens from the filename
-    # final_filename = final_filename.replace(" ", "")
-    # final_filename = final_filename.replace("(", "")
-    # final_filename = final_filename.replace(")", "")
-    # remove whitespace and parens from the stem of the filename
+
+    # if no gridsearch was done, do not use the params_suffix
+    if this_config["Sorting"]["do_KS_param_gridsearch"] == 0:
+        params_suffix = ""
+    else:
+        params_suffix = (
+            f"Th_{Th_this_config[0]},{Th_this_config[1]}_spkTh_{Th_this_config[2]})"
+        )
+    # add timestamp to the final filename
+    final_filename = f'{str(sorted_folder).split("_wkr")[0]}_{params_suffix}'
+    final_filename = final_filename.replace("sorted_", f"sorted_{time_stamp_us}_")
+    # remove _g0 if there is only one group
+    if len(this_config["Group"]["emg_chan_list"]) == 1:
+        final_filename = final_filename.replace("_g0", "")
+    # remove any spaces or parentheses from the filename
     final_filename = Path(final_filename)
-    final_filename = final_filename.with_name(final_filename.stem.replace(" ", ""))
-    final_filename = final_filename.with_name(final_filename.stem.replace("(", ""))
-    final_filename = final_filename.with_name(final_filename.stem.replace(")", ""))
+    final_filename = final_filename.with_name(final_filename.name.replace(" ", ""))
+    final_filename = final_filename.with_name(final_filename.name.replace("(", ""))
+    final_filename = final_filename.with_name(final_filename.name.replace(")", ""))
     final_filename = str(final_filename)
-    # remove trailing comma from the filename
-    if final_filename[-1] == ",":
+    # remove any trailing commas or underscores
+    while final_filename[-1] in [",", "_"]:
         final_filename = final_filename[:-1]
 
-    final_filename = final_filename + "_KS4"
+    # append score to the final filename
+    final_filename += f"_SCORE_{emusort_score:.3f}"
+    # Rename the folder to preserve the latest sorting results
+    # await asyncio.to_thread(shutil.move, this_config["Sorting"]["sorted_folder"], final_filename)
+    shutil.move(this_config["Sorting"]["sorted_folder"], final_filename)
 
-    # rename the folder to preserve the latest sorting results in the sorted_group#_worker# folder
-    shutil.move(these_configs[ii]["Data"]["sorted_folder"], final_filename)
-    # add entry to the config file for the final folder
-    # these_configs[ii]["Data"]["final_folder"] = final_filename
-    # print for user to copy and paste into terminal if desired
-    print(f"\nRun:\nphy template-gui {final_filename}/params.py\n")
+    # Dump this_config and save other required files
+    dump_yaml(Path(final_filename).joinpath("emu_config.yaml"), this_config)
+    np.save(
+        Path(final_filename).joinpath("emg_chans_used.npy"),
+        this_config["emg_chans_used"],
+    )
+    # make the phy command string
+    phy_msg = f"\nTo view Worker {ii} result in Phy, run:\nphy template-gui {final_filename}/params.py\n"
+    # return 2 strings to print to console later
+    return [report, phy_msg]
 
 
 def run_KS_sorting(job_list, these_configs):
@@ -565,12 +776,35 @@ def run_KS_sorting(job_list, these_configs):
     Returns:
     - None
     """
+
+    async def extract_concurrently(sortings, max_concurrent_tasks=4):
+        print("Extracting sorting results asynchronously...")
+        # Create a task for each worker job
+        tasks = []
+        for ii, sorting in enumerate(sortings):
+            task = extract_sorting_result(sorting, these_configs[ii], job_list[ii], ii)
+            tasks.append(task)
+
+        # Chunk tasks into batches of 5
+        msgs = []
+        for i in range(0, len(tasks), max_concurrent_tasks):
+            batch = tasks[i : i + max_concurrent_tasks]
+            # Run the current batch concurrently
+            msgs.append(await asyncio.gather(*batch))
+            # Print progress
+            print(
+                f"Finished extracting results for worker batch {i//max_concurrent_tasks + 1}/{np.ceil(len(tasks)/max_concurrent_tasks).astype(int)}."
+            )
+        # Flatten the list of messages
+        msgs = [msg for sublist in msgs for msg in sublist]
+        return msgs
+
     ## job_list is of below structure:
     # job_list = [
     #     {
     #         "sorter_name": "kilosort4",
     #         "recording": recording_list[i],
-    #         "output_folder": these_configs[i]["Data"]["sorted_folder"],
+    #         "output_folder": these_configs[i]["Sorting"]["sorted_folder"],
     #         **this_config["KS"],
     #     }
 
@@ -581,19 +815,17 @@ def run_KS_sorting(job_list, these_configs):
         engine_kwargs={"n_jobs": these_configs[0]["Sorting"]["num_KS_jobs"]},
         return_output=True,
     )
-    # Now extract and write the sorting results to each sorted_folder
-    try:
-        # do this in parallel using Pool
-        with Pool(these_configs[0]["Sorting"]["num_KS_jobs"]) as pool:
-            pool.starmap(extract_sorting_result, zip(sortings, range(len(job_list))))
-    except (
-        NameError
-    ):  # this is to catch a Windows error where these_configs is not defined in the worker
-        for ii, sorting in enumerate(sortings):
-            extract_sorting_result(sorting, ii)
+
+    msgs = asyncio.run(
+        extract_concurrently(
+            sortings,
+            max_concurrent_tasks=these_configs[0]["SI"]["max_concurrent_tasks"],
+        )
+    )
+    return msgs
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
         description="Process EMG data and perform spike sorting."
     )
@@ -611,24 +843,32 @@ if __name__ == "__main__":
         action="store_true",
         help="Reset the configuration file to the default EMUsort template",
     )
+    parser.add_argument(  # ability to reset the config file for KS4 default settings
+        "--ks4-reset-config",
+        action="store_true",
+        help="Reset the configuration file to the default Kilosort4 template",
+    )
     parser.add_argument(
         "-s", "--sort", action="store_true", help="Perform spike sorting"
     )
-    # parser.add_argument(
-    #     "-p",
-    #     "--phy",
-    #     action="store_true",
-    #     help="Open Phy GUI for the specified folder datestring. Defaults to latest folder without datestring.",
-    # )
 
     args = parser.parse_args()
 
+    # Set repo folder path
+    repo_folder_path = Path(__file__).parent.parent.parent
+
     # Generate, reset, or load config file
-    config_file_path = Path(args.folder).joinpath("ks4_config.yaml")
+    config_file_path = (
+        Path(args.folder).expanduser().resolve().joinpath("ks4_config.yaml")
+    )
     # if the config doesn't exist or user wants to reset, load the config template
-    if not config_file_path.exists() or args.reset_config:
+    if not config_file_path.exists() or args.reset_config or args.ks4_reset_config:
         print(f"Generating config file from default template: \n{config_file_path}\n")
-        create_config(Path(__file__).parent, Path(args.folder), ks4=True)
+        create_config(
+            repo_folder_path,
+            Path(args.folder).expanduser().resolve(),
+            ks4=args.ks4_reset_config,
+        )
 
     # open text editor to validate or edit the configuration file if desired
     if args.config:
@@ -641,16 +881,21 @@ if __name__ == "__main__":
     # Prepare common configuration file, accounting for section titles, Data, Sorting, and Group
     full_config["Data"].update(
         {
-            "repo_folder": Path(__file__).parent,
-            "session_folder": Path(args.folder),
+            "repo_folder": repo_folder_path,
+            "session_folder": Path(args.folder).expanduser().resolve(),
         }
     )
 
-    # below are checks of the configuration file to avoid downstream errors
-    assert full_config["KS"]["nblocks"] == False, "nblocks must be False for EMUsort"
-    assert (
-        full_config["KS"]["do_correction"] == False
-    ), "do_correction must be False for EMUsort"
+    si.set_global_job_kwargs(
+        n_jobs=1,
+        chunk_duration=full_config["SI"]["chunk_duration"],
+    )
+
+    # # below are checks of the configuration file to avoid downstream errors
+    # assert full_config["KS"]["nblocks"] == False, "nblocks must be False for EMUsort"
+    # assert (
+    #     full_config["KS"]["do_correction"] == False
+    # ), "do_correction must be False for EMUsort"
     # assert full_config["KS"]["do_CAR"] == False, "do_CAR must be False for EMUsort"
 
     # EMG Preprocessing and Spike Sorting
@@ -658,19 +903,31 @@ if __name__ == "__main__":
 
         # load data from the session folder
         recording = load_ephys_data(full_config)
-
+        print("Finished loading")
         # Setting GPU ordering for parallel jobs to match nvidia-smi and nvitop
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        # ensure that the output folder is set to the session folder if not specified
+        if full_config["Sorting"]["output_folder"] is None:
+            full_config["Sorting"]["output_folder"] = Path(
+                full_config["Data"]["session_folder"]
+            )
+        else:
+            # ensure that the output folder is a valid path
+            full_config["Sorting"]["output_folder"] = (
+                Path(full_config["Sorting"]["output_folder"]).expanduser().resolve()
+            )
+            full_config["Sorting"]["output_folder"].mkdir(parents=True, exist_ok=True)
+
         # loop through each group of EMG channels to sort independently
         for iGroup, emg_chan_list in enumerate(full_config["Group"]["emg_chan_list"]):
             preproc_recording = preprocess_ephys_data(recording, full_config, iGroup)
             grp_zfill_amount = len(str(len(full_config["Group"]["emg_chan_list"])))
             this_group_sorted_folder = (
-                Path(full_config["Data"]["session_folder"])
-                / f"sorted_group_{str(iGroup).zfill(grp_zfill_amount)}"
+                Path(full_config["Sorting"]["output_folder"])
+                / f'sorted_g{str(iGroup).zfill(grp_zfill_amount)}_{Path(full_config["Data"]["session_folder"]).name}'
             )
             print(f"Recording information: {preproc_recording}")
-            full_config["sort_group"] = iGroup
+            # full_config["sort_group"] = iGroup
             iParams = list(
                 ParameterGrid(full_config["Sorting"]["gridsearch_KS_params"])
             )  # get iterator of all possible param combinations
@@ -703,9 +960,7 @@ if __name__ == "__main__":
                 # create new folder for each parallel job
                 zfill_amount = len(str(full_config["Sorting"]["num_KS_jobs"]))
                 tmp_sorted_folder = (
-                    str(this_group_sorted_folder)
-                    + "_worker"
-                    + str(iW).zfill(zfill_amount)
+                    str(this_group_sorted_folder) + "_wkr" + str(iW).zfill(zfill_amount)
                 )
                 if Path(tmp_sorted_folder).exists():
                     shutil.rmtree(tmp_sorted_folder, ignore_errors=True)
@@ -713,7 +968,7 @@ if __name__ == "__main__":
                 recording_list.append(preproc_recording)
                 # create a new config file for each parallel job
                 this_config = deepcopy(full_config)
-                this_config["Data"]["sorted_folder"] = tmp_sorted_folder
+                this_config["Sorting"]["sorted_folder"] = tmp_sorted_folder
                 # check for keys first
                 if "Th" in iParams[iW]:
                     this_config["KS"]["Th_learned"] = iParams[iW]["Th"][0]
@@ -724,23 +979,33 @@ if __name__ == "__main__":
                 this_config["KS"]["nearest_chans"] = min(
                     this_config["num_chans"], this_config["KS"]["nearest_chans"]
                 )  # do not let nearest_chans exceed the number of channels
+                this_config["KS"]["nearest_templates"] = min(
+                    this_config["num_chans"], this_config["KS"]["nearest_templates"]
+                )  # do not let nearest_templates exceed the number of channels
                 this_config["KS"]["torch_device"] = (
                     "cuda:" + torch_device_ids[iW] if is_available() else "cpu"
                 )
-                # print(this_config["KS"]["torch_device"])
+                this_config["emg_chans_used"] = (
+                    preproc_recording.get_channel_ids().tolist()
+                )
+                # this_config["KS"]["save_extra_vars"] = True
+
                 these_configs.append(this_config)
 
             job_list = [
                 {
                     "sorter_name": "kilosort4",
                     "recording": recording_list[i],
-                    "output_folder": these_configs[i]["Data"]["sorted_folder"],
+                    "output_folder": these_configs[i]["Sorting"]["sorted_folder"],
                     **these_configs[i]["KS"],
                 }
                 for i in range(total_KS_jobs)
             ]
-
-            run_KS_sorting(job_list, these_configs)
+            msgs = run_KS_sorting(job_list, these_configs)
+            for msg in msgs:
+                print(msg[0])
+            for msg in msgs:
+                print(msg[1])
 
     # Print status and time elapsed
     print("Pipeline finished! You've earned a break.")
@@ -750,16 +1015,6 @@ if __name__ == "__main__":
         f"Time elapsed: {strfdelta(time_elapsed, '{hours} hours, {minutes} minutes, {seconds} seconds')}"
     )
 
-    # if args.phy:
-    #     # make sure only one sort was performed
-    #     if len(these_configs) > 1 or len(full_config["Group"]["emg_chan_list"]) > 1:
-    #         print(
-    #             "Multiple sorts were performed, ignoring -p/--phy flag. Phy command can only be used for one sort at a time."
-    #         )
-    #         args.phy = False
 
-    #     if args.phy:
-    #         # open Phy GUI for this final folder
-    #         subprocess.run(
-    #             ["phy", "template-gui", these_configs[0]["Data"]["final_folder"]]
-    #         )
+if __name__ == "__main__":
+    main()
