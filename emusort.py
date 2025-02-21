@@ -368,6 +368,9 @@ def preprocess_ephys_data(
         freq_min=this_config["Data"]["emg_passband"][0],
         freq_max=this_config["Data"]["emg_passband"][1],
     )
+
+    recording_filtered = siFull.phase_shift(recording_filtered)
+    recording_filtered = siFull.common_reference(recording_filtered, operator="median", reference="global")
     remove_bad_emg_chans = this_config["Group"]["remove_bad_emg_chans"][iGroup]
     # detect bad channels on filtered recording
     if isinstance(remove_bad_emg_chans, bool):
@@ -430,7 +433,15 @@ def preprocess_ephys_data(
     recording_notch = spre.notch_filter(
         recording_filtered, freq=60, q=30
     )  # Apply notch filter at 60 Hz
-
+    recording_notch = spre.notch_filter(
+        recording_notch, freq=1524, q=30
+    )  
+    recording_notch = spre.notch_filter(
+        recording_notch, freq=6093, q=30
+    )
+    recording_notch = spre.notch_filter(
+        recording_notch, freq=10668, q=30
+    )  
     # set a probe for the recording
     probe = create_probe(recording_notch)
     preprocessed_recording = recording_notch.set_probe(probe)
@@ -970,9 +981,10 @@ def main():
                 this_config = deepcopy(full_config)
                 this_config["Sorting"]["sorted_folder"] = tmp_sorted_folder
                 # check for keys first
-                if "Th" in iParams[iW]:
-                    this_config["KS"]["Th_learned"] = iParams[iW]["Th"][0]
-                    this_config["KS"]["Th_universal"] = iParams[iW]["Th"][1]
+                if "Th_learned" in iParams[iW]:
+                    this_config["KS"]["Th_learned"] = iParams[iW]["Th_learned"][0]
+                if "Th_universal" in iParams[iW]:
+                    this_config["KS"]["Th_universal"] = iParams[iW]["Th_universal"][0]
                 if "spkTh" in iParams[iW]:
                     this_config["KS"]["Th_single_ch"] = iParams[iW]["spkTh"]
                 this_config["num_chans"] = preproc_recording.get_num_channels()
