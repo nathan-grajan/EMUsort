@@ -740,11 +740,15 @@ async def extract_sorting_result(this_sorting, this_config, this_job, ii):
         params_suffix = ""
     else:
         params_suffix = (
-            f"Th_{Th_this_config[0]},{Th_this_config[1]}_spkTh_{Th_this_config[2]})"
+            f"Th_lrnd{Th_this_config[0]},Th_univ_{Th_this_config[1]},Th_ch{Th_this_config[2]})"
         )
+    
     # add timestamp to the final filename
+    prefix_relative_learned_universal = "+" if this_config["KS"]["Th_learned"] >= this_config["KS"]["Th_universal"] else "-"
+
     final_filename = f'{str(sorted_folder).split("_wkr")[0]}_{params_suffix}'
-    final_filename = final_filename.replace("sorted_", f"sorted_{time_stamp_us}_")
+    final_filename = final_filename.replace("sorted_", f"{prefix_relative_learned_universal}_sorted_{time_stamp_us}_")
+    # prepend + if Th_learned >= Th_universla because it's what we believe may give bette results
     # remove _g0 if there is only one group
     if len(this_config["Group"]["emg_chan_list"]) == 1:
         final_filename = final_filename.replace("_g0", "")
@@ -761,6 +765,8 @@ async def extract_sorting_result(this_sorting, this_config, this_job, ii):
     # append score to the final filename
     final_filename += f"_SCORE_{emusort_score:.3f}"
     # Rename the folder to preserve the latest sorting results
+
+    
     # await asyncio.to_thread(shutil.move, this_config["Sorting"]["sorted_folder"], final_filename)
     shutil.move(this_config["Sorting"]["sorted_folder"], final_filename)
 
