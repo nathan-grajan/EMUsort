@@ -729,19 +729,18 @@ async def extract_sorting_result(this_sorting, this_config, this_job, ii):
 
     # Move results into file folder for storage
     time_stamp_us = datetime.now().strftime("%Y%m%d_%H%M%S%f")
-    Th_this_config = (
-        this_config["KS"]["Th_learned"],
-        this_config["KS"]["Th_universal"],
-        tuple(this_config["KS"]["Th_single_ch"]),
-    )
+    Th_this_config = {
+        "Th_lrnd": this_config["KS"]["Th_learned"],
+        "Th_univ":this_config["KS"]["Th_universal"],
+        "Th_ch": tuple(this_config["KS"]["Th_single_ch"]),
+        "N_templates": this_config["KS"]["n_templates"]
+    }
 
     # if no gridsearch was done, do not use the params_suffix
     if this_config["Sorting"]["do_KS_param_gridsearch"] == 0:
         params_suffix = ""
     else:
-        params_suffix = (
-            f"Th_lrnd{Th_this_config[0]},Th_univ_{Th_this_config[1]},Th_ch{Th_this_config[2]})"
-        )
+        params_suffix = ",".join([f"{key}_{value}" for key, value in Th_this_config.items()])
     
     # add timestamp to the final filename
     prefix_relative_learned_universal = "+" if this_config["KS"]["Th_learned"] >= this_config["KS"]["Th_universal"] else "-"
@@ -987,12 +986,20 @@ def main():
                 this_config = deepcopy(full_config)
                 this_config["Sorting"]["sorted_folder"] = tmp_sorted_folder
                 # check for keys first
-                if "Th_learned" in iParams[iW]:
-                    this_config["KS"]["Th_learned"] = iParams[iW]["Th_learned"][0]
-                if "Th_universal" in iParams[iW]:
-                    this_config["KS"]["Th_universal"] = iParams[iW]["Th_universal"][0]
-                if "spkTh" in iParams[iW]:
-                    this_config["KS"]["Th_single_ch"] = iParams[iW]["spkTh"]
+                # if "Th_learned" in iParams[iW]:
+                #     this_config["KS"]["Th_learned"] = iParams[iW]["Th_learned"][0]
+                # if "Th_universal" in iParams[iW]:
+                #     this_config["KS"]["Th_universal"] = iParams[iW]["Th_universal"][0]
+                # if "spkTh" in iParams[iW]:
+                #     this_config["KS"]["Th_single_ch"] = iParams[iW]["spkTh"]
+
+                # Loop through full_config["Sorting"]["gridsearch_KS_params"]
+                gridsearch_params = full_config['Sorting']['gridsearch_KS_params']
+                for param, _ in gridsearch_params.items():
+                    if param in iParams[iW]:
+                        this_config["KS"][param] = iParams[iW][param][0]
+
+
                 this_config["num_chans"] = preproc_recording.get_num_channels()
                 this_config["KS"]["nearest_chans"] = min(
                     this_config["num_chans"], this_config["KS"]["nearest_chans"]
