@@ -17,7 +17,7 @@ import subprocess
 from copy import deepcopy
 from pathlib import Path
 from typing import Union
-
+import re
 import numpy as np
 import spikeinterface as si
 import spikeinterface.full as siFull
@@ -277,8 +277,40 @@ def load_ephys_data(
             )
         loaded_recording = si.append_recordings(loaded_recording_list)
     elif dataset_type == "sglx":
-        loaded_recording = siFull.read_spikeglx(session_folder, stream_name = 'imec0.ap', load_sync_channel=False)
-        # TODO: Add concatenation feature for multiple recordings. only works for one rn 
+        # FOLDER STRUCTURE:
+        # /path/to/session_folder/ (e.g. /snel/share/share/data/Govindarajan_AirForce/nibbles_20250410/nibbles_20250410_neural)
+        # ├──  folder_g0
+        # │   ├──  folder_g0_imec0
+        # ├──  folder_g1
+        # │   ├──  folder_g1_imec0
+        # ....
+        # NOTE: This currently only works for one probe. Will work for mice after nibbles, not necessarily for previous mice (due to folder structure)
+
+        # From session folder, get the list of folders and enter _imec0 folder
+        # get list of folders
+        print(f"Loading SpikeGLX data from {session_folder}...")
+        session_folder = Path(session_folder)  # make sure it’s a Path
+
+        # get only sub‐folders, should be folder_g0, folder_g1, etc.
+        subfolders = sorted(
+            [f for f in session_folder.iterdir() if f.is_dir()],
+            key=lambda p: p.name
+        )
+        loaded_recording_list = []
+        for folder in subfolders:
+            rel_path = folder.relative_to(session_folder)   # folder_g0, folder_g1, etc.
+            abs_path = folder.resolve()                     # full absolute path
+
+            imec_folder = str(rel_path) + "_imec0"
+            gate_recording_folder = folder / imec_folder
+
+            gate_recording = siFull.read_spikeglx(
+                gate_recording_folder,
+                stream_name='imec0.ap',
+                load_sync_channel=False
+            )
+            loaded_recording_list.append(gate_recording)
+        loaded_recording = si.concatenate_recordings(loaded_recording_list)
     return loaded_recording
 
 
@@ -370,7 +402,15 @@ def preprocess_ephys_data(
     )
 
     recording_filtered = siFull.phase_shift(recording_filtered)
-    recording_filtered = siFull.common_reference(recording_filtered, operator="median", reference="global")
+    common_reference_type = this_config["Data"].get("common_reference", "global") # "local" or "global"; defaults to "global" if common_reference is undefined in YAML
+    print(f"Common reference type {common_reference_type}")
+    if common_reference_type == "local":
+        # local common reference
+        recording_filtered = siFull.common_reference(
+            recording_filtered, operator="median",reference=common_reference_type, local_radius=(30,120)
+        )
+    else:
+        recording_filtered = siFull.common_reference(recording_filtered, operator="median", reference=common_reference_type)
     remove_bad_emg_chans = this_config["Group"]["remove_bad_emg_chans"][iGroup]
     # detect bad channels on filtered recording
     if isinstance(remove_bad_emg_chans, bool):
@@ -433,15 +473,15 @@ def preprocess_ephys_data(
     recording_notch = spre.notch_filter(
         recording_filtered, freq=60, q=30
     )  # Apply notch filter at 60 Hz
-    recording_notch = spre.notch_filter(
-        recording_notch, freq=1524, q=30
-    )  
-    recording_notch = spre.notch_filter(
-        recording_notch, freq=6093, q=30
-    )
-    recording_notch = spre.notch_filter(
-        recording_notch, freq=10668, q=30
-    )  
+    # recording_notch = spre.notch_filter(
+    #     recording_notch, freq=1524, q=30
+    # )  
+    # recording_notch = spre.notch_filter(
+    #     recording_notch, freq=6093, q=30
+    # )
+    # recording_notch = spre.notch_filter(
+    #     recording_notch, freq=10668, q=30
+    # )  
     # set a probe for the recording
     probe = create_probe(recording_notch)
     preprocessed_recording = recording_notch.set_probe(probe)
@@ -743,14 +783,14 @@ async def extract_sorting_result(this_sorting, this_config, this_job, ii):
         params_suffix = ",".join([f"{key}_{value}" for key, value in Th_this_config.items()])
     
     # add timestamp to the final filename
-    prefix_relative_learned_universal = "+" if this_config["KS"]["Th_learned"] >= this_config["KS"]["Th_universal"] else "-"
+    #prefix_relative_learned_universal = "+" if this_config["KS"]["Th_learned"] >= this_config["KS"]["Th_universal"] else "-"
 
     final_filename = f'{str(sorted_folder).split("_wkr")[0]}_{params_suffix}'
-    final_filename = final_filename.replace("sorted_", f"{prefix_relative_learned_universal}_sorted_{time_stamp_us}_")
+    final_filename = final_filename.replace("sorted_", f"sorted_{time_stamp_us}_")
     # prepend + if Th_learned >= Th_universla because it's what we believe may give bette results
     # remove _g0 if there is only one group
-    if len(this_config["Group"]["emg_chan_list"]) == 1:
-        final_filename = final_filename.replace("_g0", "")
+    # if len(this_config["Group"]["emg_chan_list"]) == 1:
+    #     final_filename = final_filename.replace("_g0", "")
     # remove any spaces or parentheses from the filename
     final_filename = Path(final_filename)
     final_filename = final_filename.with_name(final_filename.name.replace(" ", ""))
@@ -831,6 +871,24 @@ def run_KS_sorting(job_list, these_configs):
         engine_kwargs={"n_jobs": these_configs[0]["Sorting"]["num_KS_jobs"]},
         return_output=True,
     )
+
+    # For neuropixel 2.0, sort each shank independently
+
+    # sortings = []
+    # for job in job_list:
+    #     # run the sorter for each job
+    #     print(job)
+    #     sorting = ss.run_sorter_by_property(
+    #         #sorter_name=job["sorter_name"],
+    #         #recording=job["recording"],
+    #         grouping_property="group",
+    #         engine="joblib",
+    #         engine_kwargs={"n_jobs": 4}, # 4 is the number of shanks
+    #         working_folder=job["output_folder"],
+    #         **job,
+    #     )
+    #     sortings.append(sorting)
+
 
     msgs = asyncio.run(
         extract_concurrently(
@@ -972,14 +1030,25 @@ def main():
             these_configs = []
             recording_list = []
             # loop through each parallel job and create separate config files for each
+            base = 0 # for if other jobs are already running and don't want to overwrite
             for iW in worker_ids:
                 # create new folder for each parallel job
+                if iW == 0:
+                    existing_dirs = list(Path(this_group_sorted_folder).parent.glob(f"{Path(this_group_sorted_folder).name}_wkr*"))
+                    max_number = 0
+                    for dir_path in existing_dirs:
+                        match = re.search(r"_wkr(\d+)", str(dir_path))
+                        if match:
+                            max_number = max(max_number, int(match.group(1)))
+                    base = max_number + 1  # Set the base to the next available number
+
                 zfill_amount = len(str(full_config["Sorting"]["num_KS_jobs"]))
-                tmp_sorted_folder = (
-                    str(this_group_sorted_folder) + "_wkr" + str(iW).zfill(zfill_amount)
-                )
-                if Path(tmp_sorted_folder).exists():
-                    shutil.rmtree(tmp_sorted_folder, ignore_errors=True)
+                tmp_sorted_folder = f"{this_group_sorted_folder}_wkr{str(base + iW).zfill(zfill_amount)}"
+
+                #if Path(tmp_sorted_folder).exists():
+                    # append a number to the folder name if it already exists
+                    
+                    #shutil.rmtree(tmp_sorted_folder, ignore_errors=True)
                 # Path(tmp_sorted_folder).mkdir(parents=True, exist_ok=True)
                 recording_list.append(preproc_recording)
                 # create a new config file for each parallel job
